@@ -1,7 +1,7 @@
 ---
 title: "Weight Lifting Data Analysis"
 author: "arbkz"
-date: "6/16/2019"
+date: "16/06/2019"
 output: 
   html_document: 
     fig_height: 8
