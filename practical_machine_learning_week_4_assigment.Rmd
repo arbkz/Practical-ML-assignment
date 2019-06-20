@@ -1,0 +1,247 @@
+---
+title: "Weight Lifting Data Analysis"
+author: "arbkz"
+date: "6/16/2019"
+output: 
+  html_document: 
+    fig_height: 8
+    fig_width: 8
+    keep_md: yes
+---
+
+```{r setup, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+## Intro
+
+The goal of this analysis is to use the Weight Lifting Exercises dataset to train a predictor that can determine how well a dumbell bicep curl is performed, and help identify common errors in weight lifting technique.
+
+The data used to train the model is the [*Weight Lifting Exercises*](http://groupware.les.inf.puc-rio.br/har) dataset.
+
+We split the data into training/testing and validation sets and use the training data to train 3 component models (LDA, KNN and RF).
+We then use the testing data to tune the models in terms of what cross validation and preprocessing methods to use.  
+We then combine/stack the component models using a random forest model and use this ensemble model to predict the class for 20 datapoints in the validation set.
+
+
+## The Data
+
+This analysis uses data from the [*Weight Lifting Exercises dataset*](http://groupware.les.inf.puc-rio.br/har). 
+
+Six  test subjects participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different ways: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+The link to the data for this project can be found in the references section
+
+## Data Processing 
+
+We download and load the orinal testing and training data into training and testing variables.
+
+The original training data consists of 19622 rows and 160 different columns and we see that there are 100 columns which have 97%+ NA values.
+Since certain models like Random Forests will not cope well with NA values, rather than impute the data from such limited sample set we will remove these columns from the analysis all together.
+
+We will also eliminate the user_name, timestamp and window information as we are not doing any time series forecasting and it doesnt make sense to include things like username in a generalised prediction model.
+
+We will relabel the original testing dataset as **validation_set** and use data this data later to test our model and generate the predictions for the quiz.
+We then split the training data (70/30) further and label these as **training_set** and **testing_set**. 
+
+``` {r read_data, cache = TRUE, warning = FALSE}
+
+library(caret)
+library(dplyr)
+library(ggplot2)
+library(GGally)
+
+library(doParallel)
+clust <- makePSOCKcluster(6)
+registerDoParallel(clust)
+
+training_data_url <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+testing_data_url <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+
+#setwd("~/Documents/R\ Projects/coursera/practical_machine_learning_wk4_assignment")
+
+if (!file.exists('./sample_data'))     dir.create('./sample_data')
+if (!file.exists('./sample_data/pml-training.csv'))   download.file(testing_data_url,'./sample_data/pml-testing.csv', method = 'curl')
+if (!file.exists('./sample_data/pml-testing.csv'))    download.file(training_data_url,'./sample_data/pml-training.csv', method = 'curl')
+
+training <- read.csv('./sample_data/pml-training.csv', stringsAsFactors = T, na.strings = c('#DIV/0!', 'NaN', 'NA'))
+testing <- read.csv('./sample_data/pml-testing.csv', stringsAsFactors = T, na.strings = c('#DIV/0!', 'NaN', 'NA'))
+
+summary_na <- apply(training, 2, function(a) {sum(is.na(a)) / length(a)})
+in_summary_na <- summary_na < 0.95 
+
+training <- training[in_summary_na]
+training <- subset(training, select = -c(1:7))
+
+validation_set <- testing[in_summary_na]
+validation_set <- subset(validation_set, select = -c(1:7))
+
+set.seed(8738)
+
+inTrain <- createDataPartition(y=training$classe, p = 0.7, list = F)
+training_set <- training[inTrain,]
+testing_set <- training[-inTrain,]
+```
+
+## Exploratory Data Analysis
+
+Even after removing 100+ columns there are still too many columns/covariates to do a pairs plot of them all.
+
+Instead we take smaller subset of measurements and then look at the relationships in pairs plot.
+
+We can see the mean total_accel_belt and roll_belt is much lower for class A than the other classes but in general it is hard to see anything clearly from the data due to the sheer number of data points and covariates.
+
+
+``` {r eda, echo = TRUE, warning = FALSE, cache = TRUE}
+
+dim(training_set)
+ggpairs(data.frame(training_set[,grep("total", names(training_set))],training_set$classe))
+ggpairs(data.frame(training_set[,grep("roll", names(training_set))],training_set$classe))
+
+```
+
+## Model Selection
+
+As we need to classify the quality of the exercise technique into multiple different categories there are limited options in terms of the model types we can use. 
+
+We will build 3 models: Linear Discriminant Analysis, Random Forest and K Nearest Neighbors.
+Then final model will then be  an ensemble of the 3 different models which are combined using random forest model.
+
+We will pre-process the data for using a lda model based estimator using the Box-Cox transformation to normalise the data.
+
+Other pre-processing including pca, scale and centre was attempted but resulted in inferior prediction accuracy on the testing data set.
+
+We use the training_set to train our model and then the testing_set to create a combined model and select which model to use for final validation.
+
+We use cross-validation to train the random-forest with the default setting (k folds with k = 10). 
+After trying various different options, it appears that using cross-validation in the LDA or KNN model training did not appear to improve the model fit so in the end these models is built off the raw data. 
+
+
+``` {r prediction_setup, cache = TRUE}
+
+set.seed(7737)
+
+```
+
+### Random Forest model
+
+With a random forest model and we get a very good in-sample accuracy with no real tuning required. 
+The drawback is that final model is around (52 Mb) and it takes quite a while to build.
+
+``` {r model-random_forest, cache = TRUE}
+
+mod1_rf <- train(classe ~ . , method = "rf", data = training_set, trControl = trainControl(method = "cv"), allowParalell = TRUE)
+pred_rf <- predict(mod1_rf, testing_set)
+confusionMatrix(pred_rf,testing_set$classe)
+
+# If we want to cut down the number of variables in the model and just take the top 20 variable svarImp(mod1_rf)
+
+```
+
+We can look at simplifying the rf model by using only the top 20 covariates from the full model in terms of importance.
+
+``` {r model_rfsimple, warning = FALSE, cache = TRUE}
+
+top_covariates_rf <- mod1_rf$finalModel$importance
+covariate_rank <- sort(sapply(top_covariates_rf, function(el) { el[1]}), index.return = TRUE,decreasing = TRUE) 
+keep_list <- covariate_rank$ix[1:20]
+
+min_training_set <- subset(training_set, select = keep_list)
+min_training_set$classe <- training_set$classe
+min_testing_set <- subset(testing_set, select = keep_list)
+min_testing_set$classe <- testing_set$classe
+
+mod4_rf_min <- train(classe ~ . , method = "rf", data = min_training_set, trControl = trainControl(method = "cv"), allowParalell = TRUE)
+pred_rf_min <- predict(mod4_rf_min, min_testing_set)
+
+confusionMatrix(pred_rf_min,min_testing_set$classe)
+
+```
+
+We can see that the resulting model has in-sample accuracy of 99%+ but is smaller and trains much faster. 
+We could use this model if complexity and performance is a major bottleneck.
+
+### LDA model
+
+Next we will build a Linear Discriminant Model.
+
+When using this kind of model based predictor it's important to pre-process the variables, so we use Box-Cox to normalise the variables and ensure all the covariates are on a similar scale.
+
+Other preprocessing options like centering and scaling were attempted but not used in the final model as they decreased the in-sample accuracy.
+
+``` {r, model_lda, cache = TRUE}
+
+mod3_lda <- train(classe ~ ., data = training_set, method = "lda", preProcess = c("BoxCox"))
+
+pred_lda <- predict(mod3_lda, testing_set)
+confusionMatrix(pred_lda,testing_set$classe)
+
+```
+
+The LDA model gives us a decent accuracy (~70%) across the board and it is quick to build and only 6.2Mb.
+
+
+### K Nearest Neighbors model
+
+K Nearest neighbors is a good option for this kind of classification problem with multiple categories.
+After experimenting with cross validation it seems like it doesn't improve the in-sample accuracy, so we will use the train function with no CV.
+
+``` {r model_knn, warning = FALSE, cache = TRUE}
+
+mod5_knn <- train(classe ~ . , method = "knn", data = min_training_set)
+pred_knn <- predict(mod5_knn, testing_set)
+confusionMatrix(pred_knn,testing_set$classe)
+
+```
+
+
+### Final Model
+
+The final model combines the 3 models created above using a random forest model.
+
+``` {r model_combined, cache = TRUE, warning = FALSE}
+
+pred_DF <- data.frame(pred_rf = pred_rf, pred_knn = pred_knn, pred_lda = pred_lda, classe = testing_set$classe)
+
+
+mod_comb1 <- train(classe ~., method = "rf", data = pred_DF, trControl = trainControl(method = "cv"))
+pred_comb1 <- predict(mod_comb1, pred_DF)
+confusionMatrix(pred_comb1,testing_set$classe)
+
+```
+In the testing_set this doesn't  improve the accuracy over the Random Forest on its own but this may be as a result of Random Forest overfitting on the training data.
+We can assume that the performance of the stacked model will be better in the real world if we see that rf performance is degraded.
+
+## Final Predictions
+
+Finally we run the model on the validation set to get our final predictions.
+
+Our out-of-sample error estimation for the final model is around 0.53% and based on the quiz answers the model predicted correctly for all 20 test cases. 
+  
+``` {r final_predictions, warning = FALSE, cache = TRUE}
+
+pred_final_rf <- predict(mod1_rf, validation_set)
+pred_final_rf_min <- predict(mod4_rf_min, validation_set)
+pred_final_lda <- predict(mod3_lda, validation_set)
+pred_final_knn <- predict(mod5_knn, validation_set)
+
+pred_DF_final <- data.frame(pred_rf = pred_final_rf, pred_knn = pred_final_knn, pred_lda = pred_final_lda)
+
+pred_final_comb <- predict(mod_comb1, pred_DF_final)
+pred_final_comb
+
+mod_comb1$finalModel
+
+```
+
+## References
+This analysis was made possible by the work of Wallace Ugulino, Eduardo Velloso, Hugo Fuks.
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13). Stuttgart, Germany: ACM SIGCHI, 2013. [Link](http://groupware.les.inf.puc-rio.br/har#sbia_paper_section#ixzz5r8PNujCr)
+
+More information on the dataset is available from the website [here](http://groupware.les.inf.puc-rio.br/har)
+
+link to data:
+
+* [**Training Data**](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+* [**Testing Data**](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
